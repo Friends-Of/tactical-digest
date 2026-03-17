@@ -1,33 +1,162 @@
 import { Signal } from './types';
 
-export async function ingestMockSignals(): Promise<Signal[]> {
-  const now = Date.now();
+type OpenMeteoResponse = {
+  latitude: number;
+  longitude: number;
+  current?: {
+    time: string;
+    temperature_2m: number;
+    weather_code: number;
+    wind_speed_10m: number;
+  };
+  hourly?: {
+    time: string[];
+    precipitation_probability: number[];
+  };
+};
 
-  return [
-    {
+const FOCUS_LAT = 45.5231;
+const FOCUS_LNG = -122.6765;
+
+function clamp(value: number): number {
+  return Math.max(0, Math.min(1, value));
+}
+
+function toWeatherTitle(code: number): string {
+  if ([0, 1].includes(code)) {
+    return 'Clear weather window for outdoor sensing';
+  }
+
+  if ([2, 3, 45, 48].includes(code)) {
+    return 'Mixed sky conditions around focus area';
+  }
+
+  if ([51, 53, 55, 56, 57, 61, 63, 65, 66, 67, 80, 81, 82].includes(code)) {
+    return 'Rain risk rising through the day';
+  }
+
+  if ([71, 73, 75, 77, 85, 86].includes(code)) {
+    return 'Snow and ice conditions likely';
+  }
+
+  if ([95, 96, 99].includes(code)) {
+    return 'Storm conditions demand indoor posture';
+  }
+
+  return 'Weather conditions shifting across the day';
+}
+
+function deriveWeatherSummary(tempC: number, precipProb: number, windKmh: number): string {
+  return `${Math.round(tempC)}°C now, ${Math.round(precipProb)}% precipitation risk, and ${Math.round(windKmh)} km/h wind in the focus zone.`;
+}
+
+function deriveWeatherScores(tempC: number, precipProb: number, windKmh: number) {
+  const normalizedPrecip = clamp(precipProb / 100);
+  const normalizedWind = clamp(windKmh / 45);
+  const comfort = clamp(1 - Math.abs(tempC - 18) / 20);
+
+  const operationalImpact = clamp(0.45 + normalizedPrecip * 0.35 + normalizedWind * 0.2);
+  const actionability = clamp(0.95 - normalizedPrecip * 0.35 - normalizedWind * 0.15);
+  const timing = clamp(0.65 + normalizedPrecip * 0.2 + comfort * 0.15);
+
+  return {
+    noveltyScore: 0.42,
+    hypeScore: 0.03,
+    actionabilityScore: actionability,
+    credibilityScore: 0.96,
+    emotionalIntensityScore: clamp(normalizedPrecip * 0.25 + normalizedWind * 0.2),
+    strategicAlignmentScore: clamp(0.68 + operationalImpact * 0.18),
+    operationalImpactScore: operationalImpact,
+    timingScore: timing
+  };
+}
+
+function buildWeatherFallbackSignal(reason: 'loading' | 'error', timestamp: string): Signal {
+  const isLoading = reason === 'loading';
+
+  return {
+    id: 'sig_weather_01',
+    title: isLoading ? 'Live weather feed is warming up' : 'Live weather unavailable right now',
+    summary: isLoading
+      ? 'Using a neutral weather posture while current conditions load.'
+      : 'Weather API request failed; continue with an indoor-first backup plan for now.',
+    details: isLoading
+      ? 'Current weather payload has not returned complete fields yet. Keeping weather signal visible with neutral scores.'
+      : 'The weather service could not be reached or returned invalid data. The radar can still operate with reduced confidence until the next refresh.',
+    source: `weather/open-meteo (${reason})`,
+    category: 'weather',
+    timestamp,
+    lat: FOCUS_LAT,
+    lng: FOCUS_LNG,
+    distanceFromFocusKm: 0,
+    noveltyScore: 0.2,
+    hypeScore: 0,
+    actionabilityScore: 0.55,
+    credibilityScore: 0.4,
+    emotionalIntensityScore: 0.08,
+    strategicAlignmentScore: 0.6,
+    operationalImpactScore: 0.45,
+    timingScore: 0.52,
+    column: 'left',
+    horizon: 'daily',
+    tags: ['weather', reason]
+  };
+}
+
+async function fetchWeatherSignal(now: number): Promise<Signal> {
+  const endpoint =
+    `https://api.open-meteo.com/v1/forecast?latitude=${FOCUS_LAT}&longitude=${FOCUS_LNG}` +
+    '&current=temperature_2m,weather_code,wind_speed_10m&hourly=precipitation_probability&timezone=auto&forecast_days=1';
+
+  try {
+    const response = await fetch(endpoint, {
+      cache: 'no-store',
+      next: { revalidate: 0 }
+    });
+
+    if (!response.ok) {
+      return buildWeatherFallbackSignal('error', new Date(now - 1000 * 60 * 20).toISOString());
+    }
+
+    const payload = (await response.json()) as OpenMeteoResponse;
+
+    if (!payload.current || !payload.hourly?.precipitation_probability?.length) {
+      return buildWeatherFallbackSignal('loading', new Date(now - 1000 * 60 * 20).toISOString());
+    }
+
+    const precipProb = payload.hourly.precipitation_probability[0] ?? 0;
+    const { temperature_2m: tempC, weather_code: weatherCode, wind_speed_10m: windKmh } =
+      payload.current;
+    const calculated = deriveWeatherScores(tempC, precipProb, windKmh);
+
+    return {
       id: 'sig_weather_01',
-      title: 'Cool rain break from 12:00–16:00',
-      summary: 'Dry midday window supports a focused field walk and retail pulse check.',
+      title: toWeatherTitle(weatherCode),
+      summary: deriveWeatherSummary(tempC, precipProb, windKmh),
       details:
-        'Morning showers taper by noon, with lower wind and stable visibility downtown. Useful for in-person sensing between deep work blocks.',
-      source: 'weather/noaa-local',
+        'Live weather conditions are now feeding this signal directly. Use this to decide whether to prioritize outdoor sensing loops or preserve indoor focus blocks.',
+      source: 'weather/open-meteo (live)',
       category: 'weather',
-      timestamp: new Date(now - 1000 * 60 * 20).toISOString(),
-      lat: 45.5231,
-      lng: -122.6765,
-      distanceFromFocusKm: 1.8,
-      noveltyScore: 0.58,
-      hypeScore: 0.05,
-      actionabilityScore: 0.82,
-      credibilityScore: 0.94,
-      emotionalIntensityScore: 0.12,
-      strategicAlignmentScore: 0.72,
-      operationalImpactScore: 0.8,
-      timingScore: 0.94,
+      timestamp: payload.current.time || new Date(now - 1000 * 60 * 20).toISOString(),
+      lat: payload.latitude ?? FOCUS_LAT,
+      lng: payload.longitude ?? FOCUS_LNG,
+      distanceFromFocusKm: 0,
       column: 'left',
       horizon: 'daily',
-      tags: ['weather', 'fieldwork']
-    },
+      tags: ['weather', 'live-data', 'fieldwork'],
+      ...calculated
+    };
+  } catch {
+    return buildWeatherFallbackSignal('error', new Date(now - 1000 * 60 * 20).toISOString());
+  }
+}
+
+export async function ingestMockSignals(): Promise<Signal[]> {
+  const now = Date.now();
+  const weatherSignal = await fetchWeatherSignal(now);
+
+  return [
+    weatherSignal,
     {
       id: 'sig_calendar_01',
       title: 'Two protected strategy blocks are still open',
