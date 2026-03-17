@@ -246,10 +246,8 @@ function normalizeCalendar(
         durationMinutes: minutesBetween(start, end)
       };
     })
-    .filter(
-      (event): event is NonNullable<typeof event> =>
-        Boolean(event) && event.end.getTime() > event.start.getTime()
-    )
+    .filter((event): event is NonNullable<typeof event> => Boolean(event))
+    .filter((event) => event.end.getTime() > event.start.getTime())
     .sort((a, b) => a.start.getTime() - b.start.getTime());
 
   const busyIntervals = mergeIntervals(
