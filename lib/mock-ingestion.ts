@@ -1,12 +1,117 @@
+import { ingestGoogleCalendarSignal } from './google-calendar';
 import { Signal } from './types';
+
+function buildCalendarSignalScores(signal: ReturnType<typeof createCalendarSignalBase>['normalized']) {
+  if (!signal || signal.kind !== 'calendar') {
+    return {
+      noveltyScore: 0.4,
+      hypeScore: 0,
+      actionabilityScore: 0.7,
+      credibilityScore: 0.9,
+      emotionalIntensityScore: 0.08,
+      strategicAlignmentScore: 0.78,
+      operationalImpactScore: 0.75,
+      timingScore: 0.98
+    };
+  }
+
+  if (signal.status === 'unavailable') {
+    return {
+      noveltyScore: 0.2,
+      hypeScore: 0,
+      actionabilityScore: 0.25,
+      credibilityScore: 0.35,
+      emotionalIntensityScore: 0.05,
+      strategicAlignmentScore: 0.45,
+      operationalImpactScore: 0.3,
+      timingScore: 0.98
+    };
+  }
+
+  const longestOpenBlock = Math.max(...signal.openBlocks.map((block) => block.durationMinutes), 0);
+  const busyRatio = Math.min(signal.busyMinutes / 600, 1);
+  const openRatio = Math.min(longestOpenBlock / 180, 1);
+
+  return {
+    noveltyScore: signal.status === 'empty' ? 0.32 : 0.44,
+    hypeScore: 0,
+    actionabilityScore: Number((0.5 + openRatio * 0.45).toFixed(3)),
+    credibilityScore: signal.status === 'ready' ? 0.98 : 1,
+    emotionalIntensityScore: 0.06,
+    strategicAlignmentScore: Number((0.7 + openRatio * 0.25).toFixed(3)),
+    operationalImpactScore: Number((0.55 + busyRatio * 0.35 + openRatio * 0.1).toFixed(3)),
+    timingScore: 1
+  };
+}
+
+function createCalendarSignalBase(normalized: Awaited<ReturnType<typeof ingestGoogleCalendarSignal>>) {
+  const longestOpenBlock = [...normalized.openBlocks].sort(
+    (a, b) => b.durationMinutes - a.durationMinutes
+  )[0];
+
+  const title =
+    normalized.status === 'unavailable'
+      ? 'Calendar signal unavailable'
+      : normalized.status === 'empty'
+        ? 'No calendar events today'
+        : normalized.pressureBlocks.length > 0
+          ? `${normalized.pressureBlocks.length} pressure blocks shape the day`
+          : 'Calendar favors open execution time';
+
+  const summary =
+    normalized.status === 'ready'
+      ? normalized.summary
+      : normalized.status === 'empty'
+        ? 'The schedule is clear. Treat the day as intentionally open rather than accidentally unplanned.'
+        : normalized.summary;
+
+  const details =
+    normalized.status === 'ready'
+      ? [
+          normalized.summary,
+          normalized.pressureBlocks.length > 0
+            ? `Pressure: ${normalized.pressureBlocks.map((block) => block.label).join(', ')}.`
+            : 'Pressure: none.',
+          longestOpenBlock
+            ? `Open: ${longestOpenBlock.label} is the best protected focus window.`
+            : 'Open: no meaningful open block remains inside the configured workday.'
+        ].join(' ')
+      : normalized.status === 'empty'
+        ? 'No events were returned for today. Preserve the largest self-directed block for the most leverage-heavy work.'
+        : 'Calendar ingestion did not complete, so this signal is informational and should not drive hard commitments yet.';
+
+  return {
+    id: `sig_calendar_${normalized.date}`,
+    title,
+    summary,
+    details,
+    source: 'calendar/google',
+    category: 'calendar' as const,
+    timestamp: new Date().toISOString(),
+    lat: null,
+    lng: null,
+    distanceFromFocusKm: null,
+    column: 'left' as const,
+    horizon: 'daily' as const,
+    tags: [
+      'calendar',
+      normalized.status,
+      normalized.pressureBlocks.length > 0 ? 'pressure-blocks' : 'open-day'
+    ],
+    normalized
+  };
+}
 
 export async function ingestMockSignals(): Promise<Signal[]> {
   const now = Date.now();
+  const normalizedCalendar = await ingestGoogleCalendarSignal();
+  const calendarSignalBase = createCalendarSignalBase(normalizedCalendar);
+  const calendarScores = buildCalendarSignalScores(normalizedCalendar);
 
   return [
     {
       id: 'sig_weather_01',
-      title: 'Cool rain break from 12:00–16:00',
+      title: 'Cool rain break from 12:00-16:00',
       summary: 'Dry midday window supports a focused field walk and retail pulse check.',
       details:
         'Morning showers taper by noon, with lower wind and stable visibility downtown. Useful for in-person sensing between deep work blocks.',
@@ -26,31 +131,12 @@ export async function ingestMockSignals(): Promise<Signal[]> {
       timingScore: 0.94,
       column: 'left',
       horizon: 'daily',
-      tags: ['weather', 'fieldwork']
+      tags: ['weather', 'fieldwork'],
+      normalized: null
     },
     {
-      id: 'sig_calendar_01',
-      title: 'Two protected strategy blocks are still open',
-      summary: '09:30–11:00 and 15:00–16:30 remain unscheduled for synthesis work.',
-      details:
-        'Shift low-value administrative tasks to after 17:00. Preserve these blocks for narrative mapping and signal annotation.',
-      source: 'calendar/local',
-      category: 'calendar',
-      timestamp: new Date(now - 1000 * 60 * 30).toISOString(),
-      lat: null,
-      lng: null,
-      distanceFromFocusKm: null,
-      noveltyScore: 0.4,
-      hypeScore: 0,
-      actionabilityScore: 0.91,
-      credibilityScore: 1,
-      emotionalIntensityScore: 0.08,
-      strategicAlignmentScore: 0.9,
-      operationalImpactScore: 0.93,
-      timingScore: 0.98,
-      column: 'left',
-      horizon: 'daily',
-      tags: ['calendar', 'deep-work']
+      ...calendarSignalBase,
+      ...calendarScores
     },
     {
       id: 'sig_local_01',
@@ -74,7 +160,8 @@ export async function ingestMockSignals(): Promise<Signal[]> {
       timingScore: 0.73,
       column: 'center',
       horizon: 'weekly',
-      tags: ['city', 'retail-intuition']
+      tags: ['city', 'retail-intuition'],
+      normalized: null
     },
     {
       id: 'sig_creative_01',
@@ -98,7 +185,8 @@ export async function ingestMockSignals(): Promise<Signal[]> {
       timingScore: 0.67,
       column: 'center',
       horizon: 'monthly',
-      tags: ['creative-ai', 'positioning']
+      tags: ['creative-ai', 'positioning'],
+      normalized: null
     },
     {
       id: 'sig_macro_01',
@@ -122,7 +210,8 @@ export async function ingestMockSignals(): Promise<Signal[]> {
       timingScore: 0.64,
       column: 'center',
       horizon: 'long_term',
-      tags: ['career', 'macro']
+      tags: ['career', 'macro'],
+      normalized: null
     },
     {
       id: 'sig_noise_01',
@@ -146,7 +235,8 @@ export async function ingestMockSignals(): Promise<Signal[]> {
       timingScore: 0.35,
       column: 'right',
       horizon: 'daily',
-      tags: ['noise', 'suppressed']
+      tags: ['noise', 'suppressed'],
+      normalized: null
     }
   ];
 }

@@ -12,6 +12,41 @@ export type SignalCategory =
   | 'narrative_atmosphere'
   | 'noise';
 
+export type CalendarEventSignal = {
+  id: string;
+  title: string;
+  start: string;
+  end: string;
+  status: string;
+  location: string | null;
+  isAllDay: boolean;
+  durationMinutes: number;
+};
+
+export type CalendarTimeBlock = {
+  start: string;
+  end: string;
+  durationMinutes: number;
+  label: string;
+};
+
+export type CalendarDayStatus = 'ready' | 'empty' | 'unavailable';
+
+export type CalendarNormalizedSignal = {
+  kind: 'calendar';
+  status: CalendarDayStatus;
+  date: string;
+  timeZone: string;
+  eventCount: number;
+  busyMinutes: number;
+  pressureBlocks: CalendarTimeBlock[];
+  openBlocks: CalendarTimeBlock[];
+  events: CalendarEventSignal[];
+  summary: string;
+};
+
+export type NormalizedSignal = CalendarNormalizedSignal;
+
 export type Signal = {
   id: string;
   title: string;
@@ -34,6 +69,7 @@ export type Signal = {
   column: RadarColumn;
   horizon: StrategicHorizon;
   tags: string[];
+  normalized: NormalizedSignal | null;
 };
 
 export type RelevanceScore = {
